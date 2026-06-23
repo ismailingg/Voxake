@@ -48,12 +48,16 @@ class Task(BaseModel):
 
 
 class VoiceMemoExtraction(BaseModel):
-    id: UUID
     recorded_at: datetime
     transcript: str
     summary_points: list[str]
     tasks: list[Task]
     decisions: list[Decision]
     people: list[Person]
-    status: JobStatus = JobStatus.pending
+
+
+class JobResponse(BaseModel):
+    id: UUID
+    status: JobStatus
     error_message: Optional[str] = None
+    result: Optional[VoiceMemoExtraction] = None
