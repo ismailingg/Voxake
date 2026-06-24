@@ -3,6 +3,7 @@ from app.config import get_settings
 from app.models import VoiceMemoExtraction
 from datetime import datetime
 from fastapi import HTTPException
+from pydantic import ValidationError
 import json
 
 settings = get_settings()
@@ -36,23 +37,32 @@ Return ONLY a valid JSON object with this exact structure, no extra text, no mar
     "summary_points": [...]
 }"""
 
-CORRECTION_PROMPT = """The following JSON output failed validation against our schema.
+CORRECTION_PROMPT = """The following JSON was parsed successfully but failed Pydantic validation.
 
-Original JSON:
-{broken_json}
+JSON:
+{valid_json}
 
 Validation error:
 {error}
 
-Fix the JSON to match this exact structure:
-{
-    "tasks": [...],
-    "decisions": [...],
-    "people": [...],
-    "summary_points": [...]
-}
+Fix the JSON to match the schema exactly. Pay attention to:
+- type field must be one of: personal, work, health, self_help
+- priority if present must be one of: high, medium, low
+- deadline_iso must be YYYY-MM-DD format if present
 
 Return ONLY the fixed JSON, no extra text, no markdown, no backticks."""
+
+
+def _call_llm(system_prompt: str, user_message: str) -> str:
+    response = groq_client.chat.completions.create(
+        model=settings.groq_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        temperature=0.1,
+    )
+    return response.choices[0].message.content
 
 
 async def extract_structure(
@@ -60,55 +70,46 @@ async def extract_structure(
     recorded_at: datetime,
 ) -> VoiceMemoExtraction:
 
-    # First attempt
+    # Step 1: Call LLM with transcript
+    raw_text = _call_llm(EXTRACTION_PROMPT, transcript)
+
+    # Step 2: Parse JSON — retry same prompt once if malformed
     try:
-        raw = groq_client.chat.completions.create(
-            model=settings.groq_model,
-            messages=[
-                {"role": "system", "content": EXTRACTION_PROMPT},
-                {"role": "user", "content": transcript},
-            ],
-            temperature=0.1,
-        )
-
-        raw_text = raw.choices[0].message.content
         parsed = json.loads(raw_text)
+    except json.JSONDecodeError:
+        raw_text = _call_llm(EXTRACTION_PROMPT, transcript)
+        try:
+            parsed = json.loads(raw_text)
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"LLM returned malformed JSON twice: {str(e)}",
+            )
 
+    # Step 3: Validate against Pydantic — send correction prompt if invalid
+    try:
         return VoiceMemoExtraction(
             recorded_at=recorded_at,
             transcript=transcript,
             **parsed,
         )
-
-    except (json.JSONDecodeError, Exception) as first_error:
-        # Second attempt — ask LLM to fix its own output
+    except ValidationError as e:
+        corrected_text = _call_llm(
+            CORRECTION_PROMPT.format(
+                valid_json=json.dumps(parsed, indent=2),
+                error=str(e),
+            ),
+            "Fix the JSON.",
+        )
         try:
-            correction = groq_client.chat.completions.create(
-                model=settings.groq_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": CORRECTION_PROMPT.format(
-                            broken_json=raw_text if "raw_text" in dir() else "No output generated",
-                            error=str(first_error),
-                        ),
-                    },
-                    {"role": "user", "content": "Fix the JSON."},
-                ],
-                temperature=0.1,
-            )
-
-            corrected_text = correction.choices[0].message.content
             corrected_parsed = json.loads(corrected_text)
-
             return VoiceMemoExtraction(
                 recorded_at=recorded_at,
                 transcript=transcript,
                 **corrected_parsed,
             )
-
-        except Exception as second_error:
+        except Exception as final_error:
             raise HTTPException(
                 status_code=500,
-                detail=f"Extraction failed after two attempts: {str(second_error)}",
+                detail=f"Extraction failed after correction attempt: {str(final_error)}",
             )
