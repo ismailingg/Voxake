@@ -1,4 +1,4 @@
-from fastapi import APIRouter, File, UploadFile, Form, BackgroundTasks, HTTPException
+from fastapi import APIRouter, File, UploadFile, Form, BackgroundTasks, HTTPException, Request
 from datetime import datetime
 from uuid import UUID, uuid4
 from app.models import JobResponse, JobStatus
@@ -12,6 +12,7 @@ from app.services.supabase_service import (
     update_job_error,
     get_job,
 )
+from app.limiter import limiter
 
 router = APIRouter()
 
@@ -39,7 +40,9 @@ async def process_memo(
 
 
 @router.post("/transcribe", response_model=JobResponse)
+@limiter.limit("5/minute")
 async def transcribe(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     recorded_at: datetime = Form(...),
@@ -76,5 +79,6 @@ async def transcribe(
 
 
 @router.get("/jobs/{job_id}", response_model=JobResponse)
-async def get_job_status(job_id: UUID):
+@limiter.limit("60/minute")
+async def get_job_status(request: Request, job_id: UUID):
     return get_job(job_id)
