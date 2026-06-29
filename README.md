@@ -16,72 +16,23 @@ The interesting engineering is in the extraction layer: Pydantic schemas enforce
 ---
 
 ## Architecture
-┌─────────────┐         ┌──────────────────────────────────────────────┐
 
-│   Browser   │         │              FastAPI (Cloud Run)              │
+```mermaid
+flowchart TD
+    A[Browser / Next.js] -->|POST /transcribe| B[FastAPI — Cloud Run]
+    B -->|upload audio| C[Supabase Storage]
+    B -->|create job row| D[Supabase PostgreSQL]
+    B -->|return job_id| A
+    A -->|poll every 2s| E[GET /jobs/job_id]
+    E --> D
 
-│             │──POST──▶│  /transcribe                                  │
-
-│  Next.js    │         │  → validate file type + size                  │
-
-│  frontend   │         │  → upload to Supabase Storage                 │
-
-│             │         │  → create job row (status: pending)           │
-
-│             │◀──────  │  → return job_id immediately                  │
-
-│             │         │                                               │
-
-│             │──GET───▶│  /jobs/{job_id}  ◀── polls every 2s          │
-
-│             │◀──────  │  → return status + result when ready          │
-
-└─────────────┘         └──────────────────┬───────────────────────────┘
-
-│ BackgroundTask
-
-▼
-
-┌──────────────────────────────────────────────┐
-
-│              Processing pipeline             │
-
-│                                              │
-
-│  Supabase Storage                            │
-
-│       → download audio bytes                 │
-
-│                                              │
-
-│  Groq Whisper (whisper-large-v3-turbo)       │
-
-│       → audio → transcript text              │
-
-│                                              │
-
-│  Groq LLaMA (llama-3.3-70b-versatile)        │
-
-│       → transcript → raw JSON                │
-
-│                                              │
-
-│  Pydantic v2 validation                      │
-
-│       → shape + type check                   │
-
-│       → correction prompt on failure          │
-
-│                                              │
-
-│  Supabase PostgreSQL                         │
-
-│       → store result, update status          │
-
-└──────────────────────────────────────────────┘
-
----
-
+    B -->|BackgroundTask| F[Processing Pipeline]
+    F -->|download audio| C
+    F -->|transcribe| G[Groq Whisper]
+    G -->|transcript text| H[Groq LLaMA 3.3 70B]
+    H -->|raw JSON| I[Pydantic v2 validation]
+    I -->|validated result| D
+```
 ## Extraction schema
 
 A single memo produces a fully typed `VoiceMemoExtraction`:
